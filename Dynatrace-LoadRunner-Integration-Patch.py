@@ -162,7 +162,7 @@ def traverse_directory(directory_path, action):
 
 # Ensure proper usage
 if len(sys.argv) < 3:
-    print("Usage: python script.py <directory_path> <action: INSERT|DELETE>")
+    print("Usage: python Dynatrace-LoadRunner-Integration-Patch.py <directory_path> <action: INSERT|DELETE>")
     sys.exit(1)
 
 # Read arguments from command-line
