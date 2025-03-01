@@ -1,15 +1,11 @@
-import os
-import re
-import sys
+import os  # Importing the os module for file and directory operations
+import re  # Importing the re module for regular expressions
+import sys  # Importing sys to handle command-line arguments
 
-# Path to your LoadRunner project directory
-directory_path = './LoadRunnerProject'
+# Template for adding the Dynatrace header function in LoadRunner scripts
+dynatrace_function_template = '\taddDynatraceHeaderTest("{tsn}PC={step_name};SI=LoadRunner;LSN={lsn_name};");\n'
 
-# Dynatrace function template with dynamic PC and LSN placeholders
-dynatrace_function_template = '''\taddDynatraceHeaderTest("TSN={transaction_name};PC={step_name};SI=LoadRunner;LSN={lsn_name};");
-'''
-
-# Dynatrace function definition that will be added to global.h
+# Definition of the Dynatrace function to be added to `global.h`
 dynatrace_function_definition = '''
 void addDynatraceHeaderTest(char* header){
     char* headerValue;
@@ -43,135 +39,132 @@ void addDynatraceHeaderTest(char* header){
 }
 '''
 
-# Excluded files array (Add your excluded files here)
-excluded_files = ["excluded_file1.c", "excluded_file2.c"]  # You can add more files as needed
+# List of files to be excluded from processing
+excluded_files = ["excluded_file1.c", "excluded_file2.c"]
 
-
-# Function to find the .usr file and return its name (without .usr extension)
+# Function to get the LSN (LoadRunner Script Name) from a `.usr` file
 def get_lsn_name(root_dir):
-    for file in os.listdir(root_dir):
-        if file.endswith('.usr'):
-            return os.path.splitext(file)[0]
-    return None
+    for file in os.listdir(root_dir):  # Loop through files in the given directory
+        if file.endswith('.usr'):  # Check if the file has a `.usr` extension
+            return os.path.splitext(file)[0]  # Extract the filename without extension
+    return "UnknownLSN"  # Return a default name if no `.usr` file is found
 
+# Function to extract the step name from a given line index in the script
+def extract_step_name(lines, index):
+    step_name_match = re.search(r'"([^"]+)"', lines[index])  # Search for a quoted string
+    if step_name_match:
+        return step_name_match.group(1)  # Return the step name if found
+    
+    # Handle multi-line step names
+    for i in range(index + 1, len(lines)):  # Continue checking next lines
+        step_name_match = re.search(r'"([^"]+)"', lines[i])
+        if step_name_match:
+            return step_name_match.group(1)
+        if ';' in lines[i]:  # Stop if the statement ends without a match
+            break
+    
+    return "UnknownStep"  # Return a default value if no step name is found
 
-# Function to extract the step name from web_url or web_submit_data
-def extract_step_name(line):
-    match = re.search(r'\"([^\"]+)\"', line)
-    if match:
-        return match.group(1)
-    return None
+# Function to check if a line is commented
+def is_commented(line):
+    return line.strip().startswith("//") or "/*" in line or "*/" in line  # Check for comment markers
 
-
-# Function to process each .c file
+# Function to process a `.c` file and either insert or delete Dynatrace headers
 def process_c_file(file_path, lsn_name, action):
     with open(file_path, 'r') as file:
-        content = file.readlines()
+        content = file.readlines()  # Read all lines from the file
 
-    new_content = []
-    transaction_name = None  # Keep track of the current transaction name
-    inside_dynatrace_block = False  # Flag to track if we're inside a Dynatrace block to remove
+    new_content = []  # List to store modified file content
+    transaction_name = None  # Store current transaction name
+    inside_comment = False  # Track whether inside a block comment
 
-    # First, remove any existing Dynatrace headers
-    for line in content:
-        # If the action is DELETE or INSERT, remove all existing DynatraceHeaderTest calls
-        if action in ['DELETE', 'INSERT'] and 'addDynatraceHeaderTest' in line:
-            inside_dynatrace_block = True
-            continue  # Skip this line (removes the call)
-        elif inside_dynatrace_block and line.strip() == "":
-            inside_dynatrace_block = False  # Finished skipping the Dynatrace block
+    for i, line in enumerate(content):  # Loop through each line in the file
+        if '/*' in line:
+            inside_comment = True  # Start of a multi-line comment block
+        if '*/' in line:
+            inside_comment = False  # End of a multi-line comment block
+            new_content.append(line)
+            continue
+        
+        if inside_comment or is_commented(line):  # Skip commented lines
+            new_content.append(line)
             continue
 
-        new_content.append(line)  # Add all other lines to the new content
+        # Check if this line starts a LoadRunner transaction
+        transaction_match = re.search(r'lr_start_transaction\("([^"]+)"\);', line)
+        if transaction_match:
+            transaction_name = transaction_match.group(1)  # Store the transaction name
 
-    # If action is INSERT, add new Dynatrace headers after removing the old ones
-    if action == 'INSERT':
-        updated_content = []
-        for line in new_content:
-            transaction_match = re.search(r'lr_start_transaction\("([^"]+)"\);', line)
-            if transaction_match:
-                transaction_name = transaction_match.group(1)  # Capture the transaction name
+        # If inserting, add Dynatrace headers before web_* calls
+        if action == "INSERT" and any(keyword in line for keyword in ['web_url', 'web_submit_data', 'web_custom_request']):
+            step_name = extract_step_name(content, i)  # Get the step name
+            tsn_part = f"TSN={transaction_name};" if transaction_name else ""  # Include TSN if available
+            dynatrace_header = dynatrace_function_template.format(tsn=tsn_part, step_name=step_name, lsn_name=lsn_name)
+            new_content.append(dynatrace_header)  # Insert the Dynatrace header
+        
+        # If deleting, remove existing Dynatrace header calls
+        if action == "DELETE" and 'addDynatraceHeaderTest' in line:
+            continue  # Skip this line (remove it)
 
-            if 'web_url' in line or 'web_submit_data' in line:
-                step_name = extract_step_name(line)  # Extract step name for PC
-                if transaction_name and step_name:
-                    # Add the Dynatrace header before the web request with transaction and step info
-                    dynatrace_function = dynatrace_function_template.format(
-                        transaction_name=transaction_name, step_name=step_name, lsn_name=lsn_name
-                    )
-                    updated_content.append(dynatrace_function)
+        new_content.append(line)  # Add the (possibly modified) line to new content
+        
+        # Check if this line ends a transaction
+        if re.search(r'lr_end_transaction\("([^"]+)"', line):
+            transaction_name = None  # Reset the transaction name
 
-            updated_content.append(line)  # Add the current line
-
-        new_content = updated_content
-
-    # Save the modified content back to the file
     with open(file_path, 'w') as file:
-        file.writelines(new_content)
+        file.writelines(new_content)  # Write the modified content back to the file
 
-
-# Function to process the global.h file
+# Function to update the `global.h` file (add or remove the function definition)
 def update_global_h(global_h_path, action):
     with open(global_h_path, 'r+') as file:
-        content = file.read()
+        content = file.read()  # Read the entire file content
 
-        # If the action is INSERT, ensure the function is present
-        if action == 'INSERT':
-            if 'addDynatraceHeaderTest' not in content:
-                # Insert the function before the final #endif
-                content = content.replace('#endif', dynatrace_function_definition + '\n#endif')
+        if action == 'INSERT':  # If inserting the function definition
+            if 'addDynatraceHeaderTest' not in content:  # Check if not already present
+                content = content.replace('#endif', dynatrace_function_definition + '\n#endif')  # Insert before #endif
                 file.seek(0)
                 file.write(content)
                 file.truncate()
 
-        # If the action is DELETE, remove the function definition
-        elif action == 'DELETE':
-            content = re.sub(r'void addDynatraceHeaderTest.*?\}.*?#endif', '#endif', content, flags=re.DOTALL)
+        elif action == 'DELETE':  # If removing the function definition
+            content = re.sub(r'void addDynatraceHeaderTest.*?\}.*?#endif', '#endif', content, flags=re.DOTALL)  # Remove function block
             file.seek(0)
             file.write(content)
             file.truncate()
 
+# Function to process all `.c` files in a directory (only top-level files)
+def process_directory(directory_path, action):
+    lsn_name = get_lsn_name(directory_path)  # Get the LoadRunner Script Name
+    print(f'Processing LSN: {lsn_name} in folder: {directory_path}')
+    
+    for file in os.listdir(directory_path):  # Loop through files in the directory
+        file_path = os.path.join(directory_path, file)
 
-# Main function to traverse the directory and process .c files
-def traverse_directory(directory_path, action):
-    for root, dirs, files in os.walk(directory_path):
-        # Check if the folder contains a .usr file to get the LSN name
-        lsn_name = get_lsn_name(root)
+        # Process only `.c` files at the top level
+        if os.path.isfile(file_path) and file.endswith('.c') and file not in excluded_files:
+            print(f'Processing {action}: {file_path}')
+            process_c_file(file_path, lsn_name, action)  # Modify the file accordingly
 
-        if lsn_name:  # If an LSN name is found
-            print(f'Found LSN: {lsn_name} in folder: {root}')
-            for file in files:
-                if file.endswith('.c'):
-                    file_path = os.path.join(root, file)
-
-                    # Skip if the file is in the excluded list
-                    if file in excluded_files:
-                        print(f'Skipping file (excluded): {file_path}')
-                        continue
-
-                    # Process each .c file
-                    print(f'Processing file: {file_path}')
-                    process_c_file(file_path, lsn_name, action)
-
-                elif file == 'globals.h':
-                    # Update global.h with the function (either insert or delete)
-                    global_h_path = os.path.join(root, file)
-                    print(f'Updating globals.h: {global_h_path}')
-                    update_global_h(global_h_path, action)
-
-
-# Ensure proper usage
+# Main script execution starts here
 if len(sys.argv) < 3:
-    print("Usage: python Dynatrace-LoadRunner-Integration-Patch.py <directory_path> <action: INSERT|DELETE>")
+    print("Usage: python patch_loadrunner.py <directory_path> <INSERT|DELETE>")
+    sys.exit(1)  # Exit if not enough arguments provided
+
+directory_path = sys.argv[1]  # Get directory path from command-line arguments
+action = sys.argv[2].upper()  # Get action (INSERT/DELETE) and convert to uppercase
+
+if action not in ["INSERT", "DELETE"]:  # Validate action
+    print("Invalid action. Use INSERT or DELETE.")
     sys.exit(1)
 
-# Read arguments from command-line
-directory_path = sys.argv[1]
-action = sys.argv[2]
+# Update the global.h file if it exists
+global_h_path = os.path.join(directory_path, "globals.h")
+if os.path.exists(global_h_path):
+    print(f'Updating {action} in globals.h...')
+    update_global_h(global_h_path, action)
+else:
+    print(f"globals.h not found in {directory_path}, skipping...")
 
-if action not in ['INSERT', 'DELETE']:
-    print("Invalid action. Use 'INSERT' to add Dynatrace headers or 'DELETE' to remove them.")
-    sys.exit(1)
-
-# Execute the traversal based on action
-traverse_directory(directory_path, action)
+# Process all `.c` files in the directory
+process_directory(directory_path, action)
