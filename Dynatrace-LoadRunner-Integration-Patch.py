@@ -133,18 +133,32 @@ def update_global_h(global_h_path, action):
             file.write(content)
             file.truncate()
 
-# Function to process all `.c` files in a directory (only top-level files)
+# Process directory and subdirectories, but exclude 'data' folders
 def process_directory(directory_path, action):
-    lsn_name = get_lsn_name(directory_path)  # Get the LoadRunner Script Name
-    print(f'Processing LSN: {lsn_name} in folder: {directory_path}')
-    
-    for file in os.listdir(directory_path):  # Loop through files in the directory
-        file_path = os.path.join(directory_path, file)
+    for root, dirs, files in os.walk(directory_path):
+        if 'data' in dirs:
+            dirs.remove('data')  # Exclude 'data' folder from traversal
 
-        # Process only `.c` files at the top level
-        if os.path.isfile(file_path) and file.endswith('.c') and file not in excluded_files:
-            print(f'Processing {action}: {file_path}')
-            process_c_file(file_path, lsn_name, action)  # Modify the file accordingly
+        lsn_name = get_lsn_name(root)
+        print(f'Processing LSN: {lsn_name} in folder: {root}')
+
+        # Locate and update globals.h in each LoadRunner script folder
+        global_h_path = os.path.join(root, "globals.h")
+        if os.path.exists(global_h_path):
+            print(f'Updating {action} in {global_h_path}...')
+            update_global_h(global_h_path, action)
+        else:
+            print(f"globals.h not found in {root}, skipping...")
+
+        # Process .c files in this folder
+        for file in files:
+            file_path = os.path.join(root, file)
+
+            # Process only .c files, excluding specified files
+            if file.endswith('.c') and file not in excluded_files:
+                print(f'Processing {action}: {file_path}')
+                process_c_file(file_path, lsn_name, action)
+
 
 # Main script execution starts here
 if len(sys.argv) < 3:
